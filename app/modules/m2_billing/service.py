@@ -20,9 +20,17 @@ def _value(fields: list[str], mapping: dict[str, int], name: str) -> str:
 
 
 def coerce_row(fields: list[str], mapping: dict[str, int], *,
-               row_ref: str, line_no: int, segment: int) -> dict:
-    """字段归一；任何字段不合法都抛 coerce.CoerceError（带原因码）。"""
-    raw = {name: _value(fields, mapping, name) for name in contract.COLUMN_NAMES}
+               row_ref: str, line_no: int, segment: int,
+               contract_version: str | None = None) -> dict:
+    """字段归一；任何字段不合法都抛 coerce.CoerceError（带原因码）。
+
+    入参 ``contract_version`` 是批次绑定的契约，决定读「秒 + 单位列」还是
+    「毫秒 + 字节」。两套契约最后都产出同一形状的内部行：``duration_s``
+    折算成秒、``scan_gb`` 折算成 GB，后续计费/分摊/申诉无需再关心契约。
+    """
+    version = contract_version or config.CONTRACT_LEGACY
+    raw = {name: _value(fields, mapping, name)
+           for name in contract.column_names(version)}
     query_id = coerce.clean_text(raw["query_id"])
     if query_id == "":
         raise coerce.CoerceError("Q_MISSING_FIELD", "query_id", "")
@@ -31,6 +39,73 @@ def coerce_row(fields: list[str], mapping: dict[str, int], *,
         raise coerce.CoerceError("Q_BAD_DEPT", "dept", raw["dept"])
     project = coerce.clean_text(raw["project"]) or "未填"
     started_at = coerce.parse_instant(raw["started_at"], "started_at")
+    if version == config.CONTRACT_CURRENT:
+        duration_s, scan_bytes = _measure_v2(raw)
+        scan_gb = units.bytes_to_gb(scan_bytes)
+        unit = "B"
+        scan_raw = coerce.clean_text(raw["scan_bytes"])
+        raw["scan_bytes"] = units.big_int_text(scan_bytes)
+    else:
+        duration_s, scan_bytes, scan_gb, unit = _measure_v1(raw)
+        scan_raw = coerce.clean_text(raw["scan_size"])
+        raw["scan_bytes"] = units.big_int_text(scan_bytes)
+    concurrency = coerce.parse_int(raw["concurrency"], "concurrency", default=1)
+    if concurrency < 0:
+        raise coerce.CoerceError("Q_BAD_NUMBER", "concurrency", raw["concurrency"])
+    value_score = coerce.parse_decimal(raw["value_score"], "value_score",
+                                       allow_sentinel=True)
+    if value_score is None:
+        value_score = Decimal(0)
+    shared = coerce.parse_shared(raw["shared_with"])
+
+    flags: list[str] = []
+    if abs(scan_bytes) > Decimal(2) ** 53:
+        flags.append("Q_BIG_INT")
+    if scan_gb == 0:
+        flags.append("Q_ZERO_SCAN")
+    return {
+        "query_id": query_id,
+        "dept": dept,
+        "project": project,
+        "started_at": started_at.isoformat(),
+        "duration_s": duration_s,
+        "scan_gb": scan_gb,
+        "scan_unit": unit,
+        "scan_raw": scan_raw,
+        "scan_bytes": scan_bytes,
+        "concurrency": concurrency,
+        "value_score": value_score,
+        "shared": shared,
+        "flags": flags,
+        "contract_version": version,
+        "row_ref": row_ref,
+        "line_no": line_no,
+        "segment": segment,
+        "raw": raw,
+    }
+
+
+def _measure_v2(raw: dict) -> tuple[Decimal, Decimal]:
+    """v2：``duration_ms`` 折回秒、``scan_bytes`` 直接是字节数。
+
+    毫秒按 1000 折算，保留 6 位小数；这条路径只做单位折算，不碰时段单价。
+    绝不允许把毫秒当秒用——3600000 毫秒必须变成 3600 秒。
+    """
+    duration_ms = coerce.parse_decimal(raw["duration_ms"], "duration_ms")
+    if duration_ms is None:
+        raise coerce.CoerceError("Q_SENTINEL", "duration_ms", raw["duration_ms"])
+    if duration_ms <= 0:
+        raise coerce.CoerceError("Q_BAD_NUMBER", "duration_ms", raw["duration_ms"])
+    scan_bytes = coerce.parse_decimal(raw["scan_bytes"], "scan_bytes")
+    if scan_bytes is None:
+        raise coerce.CoerceError("Q_SENTINEL", "scan_bytes", raw["scan_bytes"])
+    if scan_bytes < 0:
+        raise coerce.CoerceError("Q_BAD_NUMBER", "scan_bytes", raw["scan_bytes"])
+    return units.ms_to_seconds(duration_ms), scan_bytes
+
+
+def _measure_v1(raw: dict) -> tuple[Decimal, Decimal, Decimal, str]:
+    """v1：``duration_s`` 秒 + ``scan_size`` / ``scan_unit``。"""
     duration_s = coerce.parse_decimal(raw["duration_s"], "duration_s")
     if duration_s is None:
         raise coerce.CoerceError("Q_SENTINEL", "duration_s", raw["duration_s"])
@@ -49,42 +124,8 @@ def coerce_row(fields: list[str], mapping: dict[str, int], *,
             unit = units.normalize_unit(unit_raw)
         except units.UnitError as exc:
             raise coerce.CoerceError("Q_BAD_UNIT", "scan_unit", unit_raw) from exc
-    concurrency = coerce.parse_int(raw["concurrency"], "concurrency", default=1)
-    if concurrency < 0:
-        raise coerce.CoerceError("Q_BAD_NUMBER", "concurrency", raw["concurrency"])
-    value_score = coerce.parse_decimal(raw["value_score"], "value_score",
-                                       allow_sentinel=True)
-    if value_score is None:
-        value_score = Decimal(0)
-    shared = coerce.parse_shared(raw["shared_with"])
-
-    scan_bytes = units.to_bytes(scan_size, unit)
-    scan_gb = units.to_gb(scan_size, unit)
-    raw["scan_bytes"] = units.big_int_text(scan_bytes)
-    flags: list[str] = []
-    if abs(scan_bytes) > Decimal(2) ** 53:
-        flags.append("Q_BIG_INT")
-    if scan_gb == 0:
-        flags.append("Q_ZERO_SCAN")
-    return {
-        "query_id": query_id,
-        "dept": dept,
-        "project": project,
-        "started_at": started_at.isoformat(),
-        "duration_s": duration_s,
-        "scan_gb": scan_gb,
-        "scan_unit": unit,
-        "scan_raw": coerce.clean_text(raw["scan_size"]),
-        "scan_bytes": scan_bytes,
-        "concurrency": concurrency,
-        "value_score": value_score,
-        "shared": shared,
-        "flags": flags,
-        "row_ref": row_ref,
-        "line_no": line_no,
-        "segment": segment,
-        "raw": raw,
-    }
+    return (duration_s, units.to_bytes(scan_size, unit),
+            units.to_gb(scan_size, unit), unit)
 
 
 def dept_scan_totals(rows: list[dict]) -> dict[str, Decimal]:
@@ -156,9 +197,25 @@ def price_rows(rows: list[dict]) -> list[dict]:
             for row in rows]
 
 
-def preview(fields: dict) -> dict:
-    """试算入口：单条字段 → 成本明细，不落库、不参与对账。"""
-    mapping = {name: index for index, name in enumerate(contract.COLUMN_NAMES)}
-    values = [coerce.clean_text(fields.get(name, "")) for name in contract.COLUMN_NAMES]
-    row = coerce_row(values, mapping, row_ref="试算", line_no=1, segment=1)
+def preview(fields: dict, *, contract_version: str | None = None) -> dict:
+    """试算入口：单条字段 → 成本明细，不落库、不参与对账。
+
+    显式给了 ``contract_version`` 就按它读；没给就按入参里的计量字段认出契约
+    （两套字段同时出现直接拒）。不会默不作声地把秒当毫秒。
+    """
+    from app import errors
+
+    try:
+        if contract_version:
+            version = contract.normalize_contract(contract_version)
+        else:
+            version = contract.detect_from_fields(fields)
+        names = contract.column_names(version)
+    except contract.ContractError as exc:
+        raise errors.BadRequest(exc.message, code=exc.code,
+                                detail=exc.detail) from exc
+    mapping = {name: index for index, name in enumerate(names)}
+    values = [coerce.clean_text(fields.get(name, "")) for name in names]
+    row = coerce_row(values, mapping, row_ref="试算", line_no=1, segment=1,
+                     contract_version=version)
     return price_one(row, volume_hit=False)

@@ -18,8 +18,38 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CHINA_TZ = dt.timezone(dt.timedelta(hours=8), "Asia/Shanghai")
 UTC = dt.timezone.utc
 
-RULE_VERSION = "costsplit/1.3.0"
+RULE_VERSION = "costsplit/2.0.0"
 MONEY_UNIT = "元"
+
+# 账单列契约版本。升级后新账单报毫秒与字节；旧批次续跑仍按 v1 的秒 + 单位列解析。
+# 契约版本在批次第一次接入时就绑定，之后续跑不能换契约，也不能混用两套列。
+CONTRACT_CURRENT = "v2"
+CONTRACT_LEGACY = "v1"
+CONTRACTS = (CONTRACT_LEGACY, CONTRACT_CURRENT)
+CONTRACT_LABELS = {
+    CONTRACT_LEGACY: "v1 秒 + 扫描单位",
+    CONTRACT_CURRENT: "v2 毫秒 + 字节",
+}
+MEASURE_BASIS = {
+    CONTRACT_LEGACY: {
+        "duration_field": "duration_s",
+        "duration_unit": "秒",
+        "duration_symbol": "s",
+        "scan_field": "scan_size",
+        "scan_unit": "见 scan_unit 列",
+        "scan_symbol": "GB",
+        "note": "时长按秒报，扫描量由 scan_size + scan_unit 折算 GB",
+    },
+    CONTRACT_CURRENT: {
+        "duration_field": "duration_ms",
+        "duration_unit": "毫秒",
+        "duration_symbol": "ms",
+        "scan_field": "scan_bytes",
+        "scan_unit": "字节",
+        "scan_symbol": "B",
+        "note": "时长按毫秒报、入库折回秒；扫描量按字节报，1024 进制折算 GB，无单位列",
+    },
+}
 CENT = Decimal("0.01")
 PRICE_DECIMALS = Decimal("0.000001")
 

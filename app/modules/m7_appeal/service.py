@@ -53,7 +53,11 @@ def pricing_row(bill: dict) -> dict:
 
 
 def apply_fix(row: dict, fix: dict) -> dict:
-    """改判字段落到一行计费入参；扫描量按改判后的单位重新折算 GB。"""
+    """改判字段落到一行计费入参；扫描量按改判后的单位重新折算 GB。
+
+    v2 契约的账单行 ``scan_unit`` 固定是 ``B``，只改 ``scan_size`` 就按字节重算；
+    只给 ``scan_unit`` 的改判在解析阶段已被拒，不会出现「数不动、单位换义」。
+    """
     out = dict(row)
     if fix.get("dept"):
         out["dept"] = fix["dept"]
@@ -61,9 +65,9 @@ def apply_fix(row: dict, fix: dict) -> dict:
         out["started_at"] = fix["started_at"]
     if fix.get("duration_s"):
         out["duration_s"] = Decimal(str(fix["duration_s"]))
-    if fix.get("scan_size") and fix.get("scan_unit"):
+    if fix.get("scan_size"):
         size = Decimal(str(fix["scan_size"]))
-        unit = fix["scan_unit"]
+        unit = fix.get("scan_unit") or out.get("scan_unit") or "GB"
         out["scan_gb"] = units.to_gb(size, unit)
         out["scan_unit"] = unit
         out["scan_raw"] = coerce.clean_text(fix["scan_size"])

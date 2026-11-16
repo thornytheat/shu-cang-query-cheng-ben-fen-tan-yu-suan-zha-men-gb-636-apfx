@@ -4,8 +4,8 @@ from __future__ import annotations
 from . import metrics, quarantine, rules
 
 
-def run(probed: dict) -> dict:
-    result = rules.validate(probed)
+def run(probed: dict, *, contract_version: str | None = None) -> dict:
+    result = rules.validate(probed, contract_version=contract_version)
     result["summary"] = metrics.summarize(result["issues"], result["counters"])
     result["distribution"] = quarantine.by_code(result["issues"])
     result["row_account"] = rules.check_row_account(result["counters"])

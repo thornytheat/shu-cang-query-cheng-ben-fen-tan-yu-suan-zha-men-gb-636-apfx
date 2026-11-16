@@ -42,6 +42,15 @@ def bytes_to_gb(nbytes: Decimal) -> Decimal:
     return value.quantize(config.PRICE_DECIMALS)
 
 
+def ms_to_seconds(duration_ms) -> Decimal:
+    """毫秒 → 秒。3600000 ms 必须得到 3600 s；只做单位折算，不改精度语义。"""
+    return (Decimal(str(duration_ms)) / Decimal(1000)).quantize(config.PRICE_DECIMALS)
+
+
+def seconds_to_ms(duration_s) -> Decimal:
+    return (Decimal(str(duration_s)) * Decimal(1000)).quantize(Decimal("0.001"))
+
+
 def big_int_text(value: Decimal) -> str:
     """大整数保形：禁科学计数法，逐位原样输出。"""
     return format(Decimal(value), "f")

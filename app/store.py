@@ -32,9 +32,13 @@ CREATE TABLE IF NOT EXISTS batches (
     budget_digest TEXT NOT NULL DEFAULT '',
     total_cents INTEGER NOT NULL DEFAULT 0,
     row_count INTEGER NOT NULL DEFAULT 0,
-    note TEXT NOT NULL DEFAULT ''
+    note TEXT NOT NULL DEFAULT '',
+    contract_version TEXT NOT NULL DEFAULT 'v1',
+    identity_key TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_batches_key ON batches(batch_key, status);
+CREATE INDEX IF NOT EXISTS idx_batches_identity ON batches(identity_key);
 CREATE TABLE IF NOT EXISTS bills (
     batch_id TEXT NOT NULL, query_id TEXT NOT NULL, row_ref TEXT NOT NULL,
     line_no INTEGER NOT NULL, segment INTEGER NOT NULL, dept TEXT NOT NULL,
@@ -120,6 +124,28 @@ class Store:
         Path(self.path).resolve().parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
+
+    def _migrate(self, conn) -> None:
+        """旧库补列：契约版本、身份键与尝试次数。
+
+        已有批次按 v1 契约（升级前只有一套列）。身份键留空：升级前的老批次由
+        `find_legacy_failed` 按「来源 + 内容 + 预算」找回，续跑成功后再回绑身份键，
+        这样迁移本身不需要重算评估日等只有运行时才知道的参数。
+        """
+        columns = {row["name"] for row in conn.execute(
+            "PRAGMA table_info(batches)").fetchall()}
+        if "contract_version" not in columns:
+            conn.execute("ALTER TABLE batches ADD COLUMN contract_version TEXT "
+                         "NOT NULL DEFAULT 'v1'")
+        if "attempts" not in columns:
+            conn.execute("ALTER TABLE batches ADD COLUMN attempts INTEGER "
+                         "NOT NULL DEFAULT 0")
+        if "identity_key" not in columns:
+            conn.execute("ALTER TABLE batches ADD COLUMN identity_key TEXT "
+                         "NOT NULL DEFAULT ''")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_batches_identity "
+                     "ON batches(identity_key)")
 
     @contextmanager
     def connect(self):
@@ -140,6 +166,36 @@ class Store:
             row = conn.execute(
                 "SELECT * FROM batches WHERE batch_key=? AND status='done' "
                 "ORDER BY created_at, rowid LIMIT 1", (batch_key,)).fetchone()
+        return dict(row) if row else None
+
+    def find_by_identity(self, identity_key: str) -> dict | None:
+        """同一身份（来源 + 预算 + 评估日）下的批次。
+
+        优先已完成的批次（复用认它），其次按接入顺序取最早的未完成尝试
+        （续跑认它）。内容是否一致由调用方比对 `input_digest` 决定。
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM batches WHERE identity_key=? "
+                "ORDER BY CASE status WHEN 'done' THEN 0 ELSE 1 END, "
+                "created_at, rowid LIMIT 1", (identity_key,)).fetchone()
+        return dict(row) if row else None
+
+    def find_legacy_failed(self, *, source: str, input_digest: str,
+                           budget_digest: str) -> dict | None:
+        """升级前落下的批次：旧代码的 batch_key 算法含规则版本与输入摘要，键对不上。
+
+        这里按「来源 + 输入摘要 + 预算摘要」找回它，让旧批次的失败重试仍沿用
+        原批次身份、仍按它绑定的旧契约解析；已完成的旧批次也能找回（避免升级后
+        同一份账单又计一次费）。
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM batches WHERE source=? AND input_digest=? "
+                "AND budget_digest=? "
+                "ORDER BY CASE status WHEN 'done' THEN 0 ELSE 1 END, "
+                "created_at, rowid LIMIT 1",
+                (source, input_digest, budget_digest)).fetchone()
         return dict(row) if row else None
 
     def get_batch(self, batch_id: str) -> dict | None:
@@ -255,19 +311,61 @@ class Store:
         conn.execute(
             """INSERT INTO batches (batch_id,batch_no,check_digit,batch_key,run_id,source,
                 budget_source,status,version,created_at,finished_at,input_digest,
-                budget_digest,total_cents,row_count,note)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                budget_digest,total_cents,row_count,note,contract_version,attempts,
+                identity_key)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(batch_id) DO UPDATE SET
                  status=excluded.status, finished_at=excluded.finished_at,
                  version=excluded.version, total_cents=excluded.total_cents,
-                 row_count=excluded.row_count, note=excluded.note""",
+                 row_count=excluded.row_count, note=excluded.note,
+                 contract_version=excluded.contract_version,
+                 identity_key=excluded.identity_key,
+                 attempts=excluded.attempts""",
             (batch["batch_id"], batch["batch_no"], batch["check_digit"],
              batch["batch_key"], batch["run_id"], batch["source"],
              batch.get("budget_source", ""), batch["status"],
              int(batch.get("version", 1)), batch["created_at"],
              batch.get("finished_at"), batch["input_digest"],
              batch.get("budget_digest", ""), int(batch.get("total_cents", 0)),
-             int(batch.get("row_count", 0)), batch.get("note", "")))
+             int(batch.get("row_count", 0)), batch.get("note", ""),
+             batch.get("contract_version", "v1"),
+             int(batch.get("attempts", 0)),
+             batch.get("identity_key", batch["batch_key"])))
+
+    def rebind_batch(self, batch_id: str, batch_key: str,
+                     identity_key: str | None = None) -> None:
+        """把升级前的老批次接到新身份键上，批次号与内容不变。"""
+        with self.connect() as conn:
+            if identity_key:
+                conn.execute(
+                    "UPDATE batches SET batch_key=?, identity_key=? "
+                    "WHERE batch_id=?", (batch_key, identity_key, batch_id))
+            else:
+                conn.execute("UPDATE batches SET batch_key=? WHERE batch_id=?",
+                             (batch_key, batch_id))
+
+    def contract_of_batch(self, batch_id: str) -> str:
+        batch = self.get_batch(batch_id)
+        version = (batch or {}).get("contract_version") or "v1"
+        return "v1" if version == "auto" else version
+
+    def bump_attempt(self, batch_id: str) -> int:
+        """续跑同一批次时累加尝试次数，批次号与身份不变。"""
+        with self.connect() as conn:
+            conn.execute("UPDATE batches SET attempts=attempts+1 WHERE batch_id=?",
+                         (batch_id,))
+            row = conn.execute("SELECT attempts FROM batches WHERE batch_id=?",
+                               (batch_id,)).fetchone()
+        return int(row["attempts"]) if row else 0
+
+    def begin_attempt(self, batch: dict) -> None:
+        """先落一条「运行中」批次，进程中途被杀也能凭它恢复原批次身份。
+
+        成功时 `save_run` 把它改成 done；失败时 `save_attempt` 改成 failed；
+        两者都不会另开批次号，因此重试不新增账单。
+        """
+        with self.connect() as conn:
+            self._insert_batch(conn, {**batch, "status": "running"})
 
     def save_attempt(self, *, batch: dict, stages: list[dict], note: str = "") -> None:
         """失败尝试：只写批次与阶段，不动任何已有批次的明细。"""
@@ -325,13 +423,21 @@ class Store:
         return rows
 
     def capture_snapshot(self, batch_id: str, kind: str) -> dict:
-        """把当前 depts/gates/shares/totals/bills 记成当前版本号的快照。"""
+        """把当前 depts/gates/shares/totals/bills 记成当前版本号的快照。
+
+        同一版本已有快照就不再写（中断后重试会再走一遍成功路径，不能写出两份
+        同版本快照）。
+        """
         state = self.state_payload(batch_id)
         with self.connect() as conn:
             row = conn.execute("SELECT version FROM batches WHERE batch_id=?",
                                (batch_id,)).fetchone()
             version = int(row["version"]) if row else 1
-            self._insert_snapshot(conn, batch_id, version, kind, state)
+            exists = conn.execute(
+                "SELECT 1 FROM snapshots WHERE batch_id=? AND version=?",
+                (batch_id, version)).fetchone()
+            if exists is None:
+                self._insert_snapshot(conn, batch_id, version, kind, state)
         return state
 
     def load_snapshots(self, batch_id: str) -> list[dict]:

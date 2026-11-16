@@ -55,6 +55,7 @@ def build(*, run_id: str, batch_id_value: str, batch_no_value: str, check: str,
           budget_digest: str, settings, params: dict, started_at: str,
           finished_at: str, elapsed_ms: int, stages: list[dict],
           counters: dict, budget_rows: int) -> dict:
+    contract_version = params.get("contract_version", config.CONTRACT_LEGACY)
     return {
         "run_id": run_id,
         "batch_id": batch_id_value,
@@ -64,6 +65,9 @@ def build(*, run_id: str, batch_id_value: str, batch_no_value: str, check: str,
         "source": source,
         "budget_source": budget_source,
         "rule_version": settings.rule_version,
+        "contract_version": contract_version,
+        "contract_label": config.CONTRACT_LABELS.get(contract_version, ""),
+        "measure_basis": config.MEASURE_BASIS.get(contract_version, {}),
         "eval_date": settings.eval_date.isoformat(),
         "input_digest": input_digest,
         "budget_digest": budget_digest,

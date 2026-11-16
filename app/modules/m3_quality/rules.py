@@ -27,8 +27,9 @@ def _signature(fields: list[str]) -> tuple[str, ...]:
     return tuple(coerce.clean_text(cell) for cell in fields)
 
 
-def validate(probed: dict) -> dict:
+def validate(probed: dict, *, contract_version: str | None = None) -> dict:
     """逐行校验脏样例；坏行进隔离区，好行继续往下算。"""
+    version = contract_version or probed.get("contract_version")
     expected = probed["expected_columns"]
     mapping = probed["mapping"]
     trailing_newline = probed["trailing_newline"]
@@ -64,7 +65,7 @@ def validate(probed: dict) -> dict:
         try:
             row = billing_service.coerce_row(
                 fields, mapping, row_ref=row_ref, line_no=record["line_no"],
-                segment=record["segment"])
+                segment=record["segment"], contract_version=version)
         except coerce.CoerceError as exc:
             counters["rows_quarantine"] += 1
             issues.append(issue(exc.code, row_ref=row_ref, field=exc.field,

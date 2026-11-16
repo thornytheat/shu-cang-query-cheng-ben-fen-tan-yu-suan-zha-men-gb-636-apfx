@@ -8,7 +8,8 @@ from . import csv_out, json_out, receipt
 
 BILL_FIELDS = ("row_ref", "line_no", "segment", "query_id", "dept", "project",
                "started_at", "duration_s", "scan_raw", "scan_unit", "scan_gb",
-               "concurrency", "value_score", "rules", "cost_yuan", "status")
+               "concurrency", "value_score", "rules", "cost_yuan", "status",
+               "contract_version")
 SHARE_FIELDS = ("query_id", "dept", "kind", "weight", "share_yuan")
 GATE_FIELDS = ("dept", "rank_no", "query_id", "value_score", "ratio",
                "cost_yuan", "cumulative_yuan", "decision")
@@ -21,6 +22,7 @@ def _yuan(cents) -> str:
 
 
 def bill_rows(store, batch_id: str) -> list[dict]:
+    contract_version = store.contract_of_batch(batch_id)
     rows = []
     for bill in store.load_bills(batch_id):
         rows.append({
@@ -40,6 +42,7 @@ def bill_rows(store, batch_id: str) -> list[dict]:
             "rules": "|".join(bill["rules"]),
             "cost_yuan": _yuan(bill["cost_cents"]),
             "status": bill["status"],
+            "contract_version": contract_version,
         })
     return rows
 
@@ -96,7 +99,8 @@ def build(store, settings, batch: dict, kind: str) -> dict:
     counters = {key: int(totals.get(key, 0)) for key in
                 ("rows_data", "rows_valid", "rows_quarantine", "rows_dedup",
                  "rows_empty")}
-    batch_view = {**batch, "rule_version": settings.rule_version}
+    batch_view = {**batch, "rule_version": settings.rule_version,
+                  "contract_version": store.contract_of_batch(batch_id)}
     text = receipt.build(batch=batch_view, totals=totals, counters=counters,
                          depts=store.load_depts(batch_id))
     return {"filename": f"{batch['batch_no']}-receipt.txt",

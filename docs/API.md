@@ -2,9 +2,11 @@
 
 | 方法 | 路径 | 用途 | 失败码 |
 |---|---|---|---|
-| GET | `/api/contract` | 列契约、单价表、规则表（按 priority 排序） | — |
-| POST | `/api/billing/preview` | 单条字段试算，不落库 | 400 `E_BAD_REQUEST`、`Q_BAD_UNIT`、`Q_SENTINEL` |
-| POST | `/api/import` | 导入样例并跑完整条流水线 | 400 路径穿越/非法后缀、404 样例缺失、422 空态/缺表头 |
+| GET | `/api/contract` | 列契约（两套）、单价表、规则表（按 priority 排序）；可带 `?contract_version=v1|v2` | 400 `E_BAD_REQUEST` |
+| POST | `/api/billing/preview` | 单条字段试算，不落库；按入参计量列自动识别契约，也可带 `contract_version` | 400 `E_BAD_REQUEST`、`Q_CONTRACT_MIXED`、`Q_CONTRACT_MISMATCH`、`Q_BAD_UNIT`、`Q_SENTINEL` |
+| POST | `/api/import` | 导入样例并跑完整条流水线；`contract_version` 声明契约、`resume` 指定续跑/新接入 | 400 路径穿越/非法后缀、404 样例缺失、422 空态/缺表头、409 `Q_CONTRACT_MIXED` `Q_CONTRACT_MISMATCH` `Q_BATCH_CONTENT_CONFLICT` `Q_BATCH_RESUME_REQUIRED` |
+| GET | `/api/ingest/contracts` | 两套可接入契约与计量依据 | — |
+| GET | `/api/batches/{batch_id}/contract` | 某批次绑定的契约、计量依据与尝试次数 | 404 `Q_NO_BATCH` |
 | GET | `/api/quarantine` | 原因码分布 + 隔离证据行（可 `?code=` 过滤） | 404 `Q_NO_BATCH` |
 | GET | `/api/allocations` | 部门份额、共享份额、未分摊、金额账 | 404 `Q_NO_BATCH` |
 | GET | `/api/gates` | 部门预算结论 + 排序决策 | 404 `Q_NO_BATCH` |

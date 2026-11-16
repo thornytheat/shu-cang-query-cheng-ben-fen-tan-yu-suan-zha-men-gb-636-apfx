@@ -44,6 +44,8 @@ function bindImport() {
     if (state.busy) return;
     const source = document.getElementById('source');
     const charset = document.getElementById('charset');
+    const mode = document.getElementById('mode');
+    const contractVersion = document.getElementById('contract-version');
     if (!source || !source.value) {
       setMessage(message, '先选一份样例', 'is-bad');
       return;
@@ -52,15 +54,26 @@ function bindImport() {
     if (button) button.disabled = true;
     setMessage(message, '导入中…');
     try {
-      const data = await postJson('/api/import', {
+      const payload = {
         source: source.value,
         charset: charset && charset.value ? charset.value : null,
-      });
+      };
+      if (mode) {
+        if (mode.value === 'new') payload.resume = false;
+        else if (mode.value === 'resume') payload.resume = true;
+      }
+      if (contractVersion && contractVersion.value) {
+        payload.contract_version = contractVersion.value;
+      }
+      const data = await postJson('/api/import', payload);
+      const access = data.access_label || '';
+      const contract = data.contract_label || '';
       setMessage(message,
-        data.batch_no + ' 完成，总额 ' + yuan(data.total_cents) + ' 元', 'is-ok');
+        data.batch_no + ' ' + access + (contract ? '（' + contract + '）' : '')
+        + ' 完成，总额 ' + yuan(data.total_cents) + ' 元', 'is-ok');
       window.setTimeout(() => window.location.reload(), 500);
     } catch (error) {
-      setMessage(message, '导入失败：' + error.message + '（换一份样例再试）', 'is-bad');
+      setMessage(message, '导入失败：' + error.message, 'is-bad');
       if (source) source.setAttribute('aria-invalid', 'true');
     } finally {
       state.busy = false;

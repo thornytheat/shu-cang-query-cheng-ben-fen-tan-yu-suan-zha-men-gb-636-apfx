@@ -1,18 +1,19 @@
 # 深度登记 costsplit（数仓查询成本分摊与预算闸门）
 
-- 规模：中型（7 个功能模块 / 7 个页面 / 91 条测试）
+- 规模：中型（7 个功能模块 / 7 个页面 / 112 条测试）
 - 核心规则一：**单查询成本** = 扫描量折算 GB × 扫描单价 + 按小时桶切分的时长 × 时段单价 + 并发加价，按 (priority, id) 顺序作用四条规则后量化到分。
 - 核心规则二：**共享查询分摊** = 部门时长(小时) × 部门扫描量(GB) 作权重，最大余额法分配到分，份额合计恒等于该查询成本；权重全零进未分摊。
 - 核心规则三：**预算闸门** = 按 收益分/成本 降序放行，累计不超过部门预算（区间 (0, budget]），其余截断；部门缺预算整体截断。
 - 核心规则四：**申诉改判** = 只改登记的几列（归属部门 / 开始时间 / 时长 / 扫描量 / 单位），改判后整批重算；同一查询多条申诉按改判内容去重，改判目标冲突时保留最早一条；结论写成新版本，回滚按旧快照再写一个新版本。
+- 核心规则五：**列契约随批次绑定** = v1（秒 + 扫描单位列）与 v2（毫秒 + 字节、无单位列）在批次首次接入时绑定；新账单必须用 v2，旧批次续跑沿用 v1；两套计量列同时出现直接拒，同一来源换契约或换内容报冲突。
 - 使用者与工作流：云格 SaaS 数据平台组 8 人，月账单 42 万，原先由会计把共享查询的成本手工拆给部门；现在导入查询账单即可得到「部门分摊 + 未分摊 + 预算内/被截断 + 逐行证据」。
 
 ## 功能模块
 
 | 模块 | 使用者动作 | 入口 | 核心文件 | 测试 |
 |---|---|---|---|---|
-| M1 账单接入 | 选样例导入，看编码/分段/截断诊断 | POST /api/import、页面 / | `app/modules/m1_ingest/decode.py` `app/modules/m1_ingest/reader.py` `app/modules/m1_ingest/sniff.py` `app/modules/m1_ingest/service.py` | `tests/test_ingest.py` |
-| M2 计费规则 | 看列契约、单价表、规则表，单条试算 | GET /api/contract、POST /api/billing/preview | `app/modules/m2_billing/contract.py` `app/modules/m2_billing/coerce.py` `app/modules/m2_billing/units.py` `app/modules/m2_billing/service.py` | `tests/test_billing.py` |
+| M1 账单接入 | 新接入或旧批次续跑，看契约、编码/分段/截断诊断与续跑清单 | POST /api/import、GET /api/ingest/contracts、GET /api/batches/{id}/contract、页面 / | `app/modules/m1_ingest/decode.py` `app/modules/m1_ingest/reader.py` `app/modules/m1_ingest/sniff.py` `app/modules/m1_ingest/service.py` | `tests/test_ingest.py` `tests/test_contract.py` |
+| M2 计费规则 | 看列契约（v1/v2）、单价表、规则表，单条试算 | GET /api/contract、POST /api/billing/preview | `app/modules/m2_billing/contract.py` `app/modules/m2_billing/coerce.py` `app/modules/m2_billing/units.py` `app/modules/m2_billing/service.py` | `tests/test_billing.py` `tests/test_contract.py` |
 | M3 异常查询 | 看原因码分布与隔离证据行 | GET /api/quarantine、页面 /quarantine | `app/modules/m3_quality/rules.py` `app/modules/m3_quality/quarantine.py` `app/modules/m3_quality/metrics.py` | `tests/test_quality.py` |
 | M4 分摊与尾差 | 按部门看份额、共享份额、未分摊 | GET /api/allocations、页面 /allocations | `app/modules/m4_alloc/weights.py` `app/modules/m4_alloc/remainder.py` `app/modules/m4_alloc/invariant.py` | `tests/test_alloc.py` |
 | M5 预算闸门与批次 | 重算闸门、看排序决策、看批次清单 | POST /api/gates、GET /api/gates、GET /api/batches、页面 /gates 与 /batches | `app/modules/m5_gate/gate.py` `app/modules/m5_gate/batchkey.py` `app/modules/m5_gate/state.py` `app/modules/m5_gate/service.py` | `tests/test_gate.py` |
@@ -43,6 +44,10 @@ v2 的申诉链路：`tests/test_m7_appeal.py`（改判 → 重算 → 时段复
 | TRAP-26 | 两个人同时改预算，旧页面后提交 | 后提交无条件覆盖新结论 | 批次 version 乐观锁，`expected_version` 落后返回 409 | `app/modules/m5_gate/batchkey.py` | `tests/test_gate.py::test_trap26_stale_version_is_rejected` |
 | TRAP-27 | 申诉把查询改到 23:30 起 1.5 小时，零点后那 1 小时被丢掉 | 只按起始小时或截到当天 24:00 计价，跨零点部分少算 | 左闭右开逐桶切、跨日续切，并用独立分桶路径与计费金额对账（`Q_APPEAL_BUCKET`） | `app/modules/m7_appeal/buckets.py` | `tests/test_m7_appeal.py::test_trap27_hours_after_midnight_are_not_dropped` |
 | TRAP-28 | 申诉把一条查询从 A 部门改到 B 部门 | 只往新部门加、不从旧部门减，总额被算重一遍 | 改判后整批重算份额与部门账，落库前校验 总额 = 分摊 + 未分摊、分摊 = 保留 + 截断 | `app/modules/m7_appeal/service.py` | `tests/test_m7_appeal.py::test_trap28_rejudgement_keeps_total_conserved` |
+| TRAP-29 | 账单升级为毫秒 + 字节后，旧批次失败重试 | 把 `duration_ms` 当秒读，时长费放大 1000 倍；或把字节当 GB，成本放大 1024³ | 契约随批次绑定：v2 按毫秒折回秒、字节折回 GB，v1 仍读秒与单位列；续跑沿用原契约 | `app/modules/m2_billing/contract.py` `app/modules/m2_billing/service.py` | `tests/test_contract.py::test_v2_duration_ms_is_converted_to_seconds` `tests/test_contract.py::test_legacy_batch_retry_keeps_original_identity` |
+| TRAP-30 | 同一份账单里既有 `duration_ms` 又有 `duration_s` | 按先到先得的列名取值，混用两套列，金额随机漂移 | 表头认出唯一契约；两套计量列同时出现或 v2 带 `scan_unit` 一律拒（`Q_CONTRACT_MIXED`） | `app/modules/m2_billing/contract.py` `app/modules/m1_ingest/sniff.py` | `tests/test_contract.py::test_header_mixing_both_contracts_is_rejected_before_any_batch` |
+| TRAP-31 | 导入中途进程被杀，再导入同一份账单 | 另开一批，同一份账单计两次费，批次号也变了 | 身份 = 来源 + 预算 + 评估日，身份相同只允许一个批次；内容相同则恢复原批次、沿用批次号与校验位，先删后插不新增行 | `app/modules/m1_ingest/service.py` `app/store.py` | `tests/test_contract.py::test_interrupted_batch_resumes_with_same_identity` |
+| TRAP-32 | 同一批次来源被换了内容后再导入 | 把新内容塞进旧批次，旧批次号下的合计悄悄变了 | 内容摘要不同报 `Q_BATCH_CONTENT_CONFLICT`，不覆盖旧批次 | `app/modules/m1_ingest/service.py` | `tests/test_contract.py::test_same_batch_with_new_content_is_a_conflict` |
 
 ## 对账规则
 
@@ -62,6 +67,9 @@ v2 的申诉链路：`tests/test_m7_appeal.py`（改判 → 重算 → 时段复
 - 反例（v2）：`test_trap27_appeal_reprice_uses_each_hour_bucket`（整段按起始时段算得 84 分，逐桶算 53 分）、`test_trap27_hours_after_midnight_are_not_dropped`（只算首小时得 11 分，续切得 32 分）、`test_trap28_rejudgement_keeps_total_conserved`（只加不减把总额算成 7182 + 358）。
 - 不变量（改判守恒）：`tests/test_m7_appeal.py::test_trap28_rejudgement_keeps_total_conserved`、`tests/test_m7_rollback.py::test_rollback_keeps_amount_account_balanced`。
 - 不变量（重放幂等）：`tests/test_m7_appeal.py::test_replaying_same_appeal_keeps_dept_totals`（同一条申诉再提交，部门分摊不变，只升版本）。
+- 不变量（契约绑定）：`tests/test_contract.py::test_v2_duration_ms_is_converted_to_seconds`（3600000 ms 必为 3600 s）、`test_batch_binds_contract_and_refuses_switch`、`test_v2_with_legacy_unit_column_is_rejected`。
+- 不变量（续跑幂等）：`tests/test_contract.py::test_interrupted_batch_resumes_with_same_identity`（同内容重试沿用批次号、不新增账单行）、`test_legacy_batch_retry_keeps_original_identity`（升级前的老批次也不另开一批）。
+- 反例（升级陷阱）：把 `duration_ms` 当秒读，同一份 100 GB / 1 小时的查询会从 322 分膨胀到数十万分；把 `scan_bytes` 当 GB 会把成本放大 1024³ 倍——两处都由 v2 的换算路径钉死。
 - 端到端：`tests/test_e2e.py::test_dirty_sample_runs_from_import_to_export`。
 
 ## 已知不覆盖

@@ -11,8 +11,14 @@ router = APIRouter(tags=["billing"])
 
 
 @router.get("/api/contract")
-def get_contract() -> dict:
-    return contract.contract_payload()
+def get_contract(contract_version: str | None = None) -> dict:
+    try:
+        version = (contract.normalize_contract(contract_version)
+                   if contract_version else None)
+    except contract.ContractError as exc:
+        raise errors.BadRequest(exc.message, code=exc.code,
+                                detail=exc.detail)
+    return contract.contract_payload(version)
 
 
 @router.post("/api/billing/preview")
@@ -23,14 +29,16 @@ async def post_preview(request: Request) -> dict:
     fields = body.get("row") if isinstance(body.get("row"), dict) else body
     if not isinstance(fields, dict) or not fields:
         raise errors.BadRequest("缺少字段 row", code="E_BAD_REQUEST")
+    version = body.get("contract_version")
     try:
-        priced = service.preview(fields)
+        priced = service.preview(fields, contract_version=version)
     except coerce.CoerceError as exc:
         raise errors.BadRequest(exc.message, code=exc.code,
                                 detail={"field": exc.field, "raw": exc.raw})
     return {
         "query_id": priced["query_id"],
         "dept": priced["dept"],
+        "contract_version": priced["contract_version"],
         "scan_gb": str(priced["scan_gb"]),
         "scan_unit": priced["scan_unit"],
         "duration_s": str(priced["duration_s"]),

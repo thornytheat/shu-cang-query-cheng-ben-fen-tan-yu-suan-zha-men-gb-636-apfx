@@ -11,12 +11,14 @@ def next_batch(store, eval_date) -> dict:
 
 
 def summary(batch: dict, totals: dict, counts: dict) -> dict:
+    version = batch.get("contract_version") or config.CONTRACT_LEGACY
     return {
         "batch_id": batch["batch_id"],
         "batch_no": batch["batch_no"],
         "check_digit": batch["check_digit"],
         "check_ok": manifest.verify(batch["batch_no"], batch["check_digit"]),
         "batch_key": batch["batch_key"],
+        "identity_key": batch.get("identity_key") or batch["batch_key"],
         "run_id": batch["run_id"],
         "source": batch["source"],
         "budget_source": batch["budget_source"],
@@ -28,6 +30,10 @@ def summary(batch: dict, totals: dict, counts: dict) -> dict:
         "row_count": int(batch.get("row_count", 0)),
         "input_digest": batch["input_digest"],
         "budget_digest": batch.get("budget_digest", ""),
+        "contract_version": version,
+        "contract_label": config.CONTRACT_LABELS.get(
+            version, "未绑定（解码阶段失败）"),
+        "attempts": int(batch.get("attempts", 0)),
         "money_unit": config.MONEY_UNIT,
         "totals": totals,
         "counts": counts,

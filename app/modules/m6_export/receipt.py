@@ -23,6 +23,7 @@ def _width(text: str) -> int:
 
 
 def build(*, batch: dict, totals: dict, counters: dict, depts: list[dict]) -> str:
+    contract_version = batch.get("contract_version") or "v1"
     rows = [
         "数仓查询成本分摊单",
         RULE,
@@ -31,6 +32,7 @@ def build(*, batch: dict, totals: dict, counters: dict, depts: list[dict]) -> st
         line("数据版本", batch["input_digest"][:12]),
         line("规则版本", batch["rule_version"] if "rule_version" in batch
              else config.RULE_VERSION),
+        line("列契约", f"{contract_version} {config.CONTRACT_LABELS.get(contract_version, '')}"),
         line("时区", "Asia/Shanghai(+08:00)"),
         RULE,
         line("数据行", str(counters.get("rows_data", 0))),
